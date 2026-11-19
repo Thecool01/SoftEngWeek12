@@ -1,0 +1,1 @@
+This packet reconstructs Task05 changes from the user-provided Assignment #04 ZIP and the assistant-prepared Task05 patch; it is NOT a fresh export of the user’s live Bolt workspace. The reviewed files match the previously provided patch, but any subsequent edits in Bolt cannot be verified here. AGENTS.md is absent from the Assignment04 ZIP; legacy AGENTS is a reference only.\n

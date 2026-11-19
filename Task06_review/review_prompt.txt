@@ -1,0 +1,6 @@
+Conduct a READ-ONLY agentic code review of the Smart Campus Explain Availability feature.
+Inputs: the supplied Task05_vs_Assignment04.patch, README_at_baseline.md, AGENTS_from_earlier_project_REFERENCE_ONLY.md, and acceptance_criteria.md.
+IMPORTANT: The AGENTS file is a legacy reference, not proof it exists in the current project; README predates Task05 and may be stale. Do not assume otherwise.
+Scope: changes to availabilityExplanation.ts, AvailabilityResultPanel.tsx and tests; inspect their dependencies such as availability.ts, App.tsx, time.ts, rooms.ts. Evaluate correctness, security/trust boundary, maintainability, performance, and test gaps.
+Do not edit, merge, deploy, install dependencies or call external APIs. Do not invent evidence.
+For each finding provide: ID, severity, file:lines, concrete evidence/reproduction, AC affected, proposed minimal fix, and status (confirmed, plausible/unverified, unsupported). Distinguish pre-existing from introduced issues. Compare findings with a second independent inspection. Note any limitations of the evidence.

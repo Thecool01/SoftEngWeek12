@@ -1,0 +1,422 @@
+--- /dev/null
++++ b/src/availabilityExplanation.ui.test.tsx
+@@ -0,0 +1,51 @@
++// @vitest-environment jsdom
++import { describe, expect, it } from 'vitest';
++import { fireEvent, render, screen } from '@testing-library/react';
++import App from '@/App';
++
++function setTime(label: string, value: string) {
++  fireEvent.change(screen.getByLabelText(label), { target: { value } });
++}
++
++function selectRoom(roomCode: string) {
++  fireEvent.click(screen.getByRole('button', { name: new RegExp(roomCode) }));
++}
++
++describe('Task 05 – UI does not change deterministic decisions', () => {
++  it('T12: explaining an available room does not change Available', async () => {
++    render(<App />);
++    expect(screen.getByText('Available')).toBeTruthy();
++    fireEvent.click(screen.getByRole('button', { name: 'Explain availability' }));
++    expect(await screen.findByText(/Room A101 is available from 14:00 to 15:00/)).toBeTruthy();
++    expect(screen.getByText('Available')).toBeTruthy();
++  });
++
++  it('T13: explaining an overlapping slot does not change Unavailable', async () => {
++    render(<App />);
++    setTime('Start Time', '15:00');
++    setTime('End Time', '16:00');
++    selectRoom('B220');
++    expect(screen.getByText('Unavailable')).toBeTruthy();
++    fireEvent.click(screen.getByRole('button', { name: 'Explain availability' }));
++    expect(await screen.findByText(/Room B220 is unavailable because the requested interval overlaps/)).toBeTruthy();
++    expect(screen.getByText('Unavailable')).toBeTruthy();
++  });
++
++  it('T14: empty time hides the availability decision and explain button', () => {
++    render(<App />);
++    setTime('Start Time', '');
++    expect(screen.queryByRole('button', { name: 'Explain availability' })).toBeNull();
++    expect(screen.queryByText('Available')).toBeNull();
++    expect(screen.queryByText('Unavailable')).toBeNull();
++  });
++
++  it('T15: changing time removes the previous explanation', async () => {
++    render(<App />);
++    fireEvent.click(screen.getByRole('button', { name: 'Explain availability' }));
++    expect(await screen.findByText(/Room A101 is available from 14:00 to 15:00/)).toBeTruthy();
++    setTime('Start Time', '15:00');
++    setTime('End Time', '16:00');
++    expect(screen.queryByText(/Room A101 is available from 14:00 to 15:00/)).toBeNull();
++    expect(screen.getByText('Available')).toBeTruthy();
++  });
++});
+--- a/src/components/AvailabilityResultPanel.tsx
++++ b/src/components/AvailabilityResultPanel.tsx
+@@ -1,7 +1,12 @@
++import { useState } from 'react';
+ import { AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
+ import { Room } from '@/data/rooms';
+ import { AvailabilityResult } from '@/lib/availability';
+ import { fmt } from '@/lib/time';
++import {
++  getExplanationReasonCode,
++  explainAvailabilitySafely,
++} from '@/lib/availabilityExplanation';
+ 
+ interface AvailabilityResultPanelProps {
+   room: Room | null;
+@@ -9,6 +14,69 @@
+   result: AvailabilityResult | null;
+   startMin: number;
+   endMin: number;
++}
++
++/** Keeps AI text separate from the authoritative availability status. */
++function ExplainAvailability({
++  room,
++  result,
++  startMin,
++  endMin,
++}: {
++  room: Room;
++  result: AvailabilityResult;
++  startMin: number;
++  endMin: number;
++}) {
++  const [explanation, setExplanation] = useState<string | null>(null);
++  const [usedFallback, setUsedFallback] = useState(false);
++  const [loading, setLoading] = useState(false);
++
++  async function handleExplain() {
++    if (loading) return;
++    setLoading(true);
++    setExplanation(null);
++
++    const request = {
++      roomLabel: room.name,
++      startTime: fmt(startMin),
++      endTime: fmt(endMin),
++      isAvailable: result.available,
++      reasonCode: getExplanationReasonCode(result),
++    };
++
++    try {
++      const response = await explainAvailabilitySafely(request);
++      setExplanation(response.explanation);
++      setUsedFallback(response.usedFallback);
++    } finally {
++      setLoading(false);
++    }
++  }
++
++  return (
++    <div className="mt-4 border-t border-slate-100 pt-4">
++      <button
++        type="button"
++        onClick={handleExplain}
++        disabled={loading}
++        className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
++      >
++        {loading ? 'Explaining...' : 'Explain availability'}
++      </button>
++      {explanation !== null && (
++        <div role="status" className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-slate-700">
++          <p className="mb-1 font-semibold text-blue-900">
++            {usedFallback ? 'Rule-based fallback explanation' : 'Mock AI explanation'}
++          </p>
++          <p>{explanation}</p>
++        </div>
++      )}
++      <p className="mt-2 text-xs text-slate-500">
++        Demo mock mode (no API call). The rule-based availability status above remains authoritative.
++      </p>
++    </div>
++  );
+ }
+ 
+ export default function AvailabilityResultPanel({
+@@ -62,6 +130,15 @@
+           </ul>
+         </div>
+       )}
++      {room && attendeesValid && result && (
++        <ExplainAvailability
++          key={`${room.id}:${startMin}:${endMin}:${result.available}:${result.reasons.join('|')}`}
++          room={room}
++          result={result}
++          startMin={startMin}
++          endMin={endMin}
++        />
++      )}
+       <p className="text-xs text-slate-400 mt-4 text-center border-t border-slate-100 pt-3">
+         This is a prototype — no booking is saved or confirmed.
+       </p>
+--- /dev/null
++++ b/src/lib/availabilityExplanation.test.ts
+@@ -0,0 +1,115 @@
++import { describe, expect, it, vi } from 'vitest';
++import { checkAvailability, SIMULATED_NOW_MINUTES } from '@/lib/availability';
++import { rooms, type Room } from '@/data/rooms';
++import {
++  explainAvailabilitySafely,
++  getExplanationReasonCode,
++  isValidExplanationResponse,
++  mockExplainAvailability,
++  type ExplanationRequest,
++} from '@/lib/availabilityExplanation';
++
++function makeRequest(room: Room, start: number, end: number): ExplanationRequest {
++  const result = checkAvailability(room, start, end, SIMULATED_NOW_MINUTES);
++  const format = (minutes: number) =>
++    `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
++  return {
++    roomLabel: room.name,
++    startTime: format(start),
++    endTime: format(end),
++    isAvailable: result.available,
++    reasonCode: getExplanationReasonCode(result),
++  };
++}
++
++const A101 = rooms.find((r) => r.name === 'A101')!;
++const B220 = rooms.find((r) => r.name === 'B220')!;
++const C310 = rooms.find((r) => r.name === 'C310')!;
++
++describe('Task 05 – explanation feature normal cases', () => {
++  it('T01: available room gives a matching explanation', async () => {
++    const request = makeRequest(A101, 840, 900); // 14:00–15:00
++    expect(request).toMatchObject({ isAvailable: true, reasonCode: 'AVAILABLE' });
++    const reply = await mockExplainAvailability(request);
++    expect(reply.explanation).toContain('is available');
++    expect(isValidExplanationResponse(reply, true)).toBe(true);
++  });
++
++  it('T02: overlapping booking gives Unavailable with OVERLAP', async () => {
++    const request = makeRequest(B220, 900, 960); // 15:00–16:00
++    expect(request).toMatchObject({ isAvailable: false, reasonCode: 'OVERLAP' });
++    const reply = await mockExplainAvailability(request);
++    expect(reply.explanation).toContain('overlaps an existing booking');
++    expect(isValidExplanationResponse(reply, false)).toBe(true);
++  });
++
++  it('T03: blocked room gives Unavailable with ROOM_BLOCKED', async () => {
++    const request = makeRequest(C310, 840, 900);
++    expect(request).toMatchObject({ isAvailable: false, reasonCode: 'ROOM_BLOCKED' });
++    const reply = await mockExplainAvailability(request);
++    expect(reply.explanation).toContain('because it is blocked');
++  });
++
++  it('T04: invalid interval 16:00–15:00 is explained, not treated as available', async () => {
++    const request = makeRequest(A101, 960, 900);
++    expect(request).toMatchObject({ isAvailable: false, reasonCode: 'INVALID_INTERVAL' });
++    const reply = await mockExplainAvailability(request);
++    expect(reply.explanation).toContain('interval is invalid');
++  });
++
++  it('T05: past start is explained using the simulated current time', async () => {
++    const request = makeRequest(A101, 660, 720); // 11:00–12:00; now is 12:00
++    expect(request).toMatchObject({ isAvailable: false, reasonCode: 'PAST_START' });
++    const reply = await mockExplainAvailability(request);
++    expect(reply.explanation).toContain('after the simulated current time');
++  });
++});
++
++describe('Task 05 – invalid input and failure handling', () => {
++  const validRequest = makeRequest(A101, 840, 900);
++
++  it('T06: empty room label is rejected before adapter is called', async () => {
++    const adapter = vi.fn().mockResolvedValue({ explanation: 'unused' });
++    const output = await explainAvailabilitySafely({ ...validRequest, roomLabel: '' }, adapter);
++    expect(adapter).not.toHaveBeenCalled();
++    expect(output.usedFallback).toBe(true);
++  });
++
++  it('T07: overly long room label is rejected before adapter is called', async () => {
++    const adapter = vi.fn().mockResolvedValue({ explanation: 'unused' });
++    const output = await explainAvailabilitySafely({ ...validRequest, roomLabel: 'X'.repeat(65) }, adapter);
++    expect(adapter).not.toHaveBeenCalled();
++    expect(output.usedFallback).toBe(true);
++  });
++
++  it('T08: timeout triggers a safe fallback instead of hanging', async () => {
++    const neverResolves = vi.fn(() => new Promise<never>(() => {}));
++    const output = await explainAvailabilitySafely(validRequest, neverResolves, 10);
++    expect(neverResolves).toHaveBeenCalledOnce();
++    expect(output).toMatchObject({ usedFallback: true });
++    expect(output.explanation).toContain('rule-based result is Available');
++  });
++
++  it('T09: simulated API failure triggers the same fallback', async () => {
++    const failingAdapter = vi.fn().mockRejectedValue(new Error('Simulated API failure'));
++    const output = await explainAvailabilitySafely(validRequest, failingAdapter);
++    expect(failingAdapter).toHaveBeenCalledOnce();
++    expect(output.usedFallback).toBe(true);
++    expect(output.explanation).toContain('rule-based result is Available');
++  });
++
++  it('T10: contradictory AI output is rejected', async () => {
++    const contradictoryAdapter = vi.fn().mockResolvedValue({
++      explanation: 'Room A101 is unavailable because it is blocked.',
++    });
++    const output = await explainAvailabilitySafely(validRequest, contradictoryAdapter);
++    expect(output.usedFallback).toBe(true);
++    expect(output.explanation).toContain('rule-based result is Available');
++  });
++
++  it('T11: adapter never mutates the existing booking data', async () => {
++    const originalBookings = JSON.stringify(rooms);
++    await mockExplainAvailability(validRequest);
++    expect(JSON.stringify(rooms)).toBe(originalBookings);
++  });
++});
+--- /dev/null
++++ b/src/lib/availabilityExplanation.ts
+@@ -0,0 +1,146 @@
++/**
++ * Practice #11: classroom-only mock explanation adapter.
++ * No network requests, API keys, personal information, or booking mutations.
++ * The caller supplies a decision already made by checkAvailability().
++ */
++export type ExplanationReasonCode =
++  | 'AVAILABLE'
++  | 'OVERLAP'
++  | 'ROOM_BLOCKED'
++  | 'INVALID_INTERVAL'
++  | 'PAST_START'
++  | 'DURATION_LIMIT'
++  | 'INVALID_TIME'
++  | 'UNAVAILABLE';
++
++export interface ExplanationRequest {
++  roomLabel: string;
++  startTime: string;
++  endTime: string;
++  isAvailable: boolean;
++  reasonCode: ExplanationReasonCode;
++}
++
++export interface ExplanationResponse {
++  explanation: string;
++}
++
++/** Map the checker result without changing the checker's return type or rules. */
++export function getExplanationReasonCode(result: {
++  available: boolean;
++  reasons: readonly string[];
++}): ExplanationReasonCode {
++  if (result.available) return 'AVAILABLE';
++
++  const firstReason = result.reasons[0] ?? '';
++  if (firstReason.startsWith('Overlaps existing booking')) return 'OVERLAP';
++  if (firstReason.startsWith('Room is blocked')) return 'ROOM_BLOCKED';
++  if (firstReason.startsWith('End time must be later')) return 'INVALID_INTERVAL';
++  if (firstReason.startsWith('Start time must be after')) return 'PAST_START';
++  if (firstReason.startsWith('Booking cannot be longer')) return 'DURATION_LIMIT';
++  if (firstReason.startsWith('Enter both a start')) return 'INVALID_TIME';
++  return 'UNAVAILABLE';
++}
++
++const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$/;
++const MAX_ROOM_LABEL_LENGTH = 64;
++const MAX_EXPLANATION_LENGTH = 240;
++
++function validateRequest(request: ExplanationRequest): void {
++  if (
++    !request ||
++    typeof request.roomLabel !== 'string' ||
++    request.roomLabel.trim().length === 0 ||
++    request.roomLabel.length > MAX_ROOM_LABEL_LENGTH ||
++    typeof request.startTime !== 'string' ||
++    typeof request.endTime !== 'string' ||
++    !TIME_PATTERN.test(request.startTime) ||
++    !TIME_PATTERN.test(request.endTime) ||
++    request.startTime === '24:00' ||
++    typeof request.isAvailable !== 'boolean' ||
++    ![
++      'AVAILABLE', 'OVERLAP', 'ROOM_BLOCKED', 'INVALID_INTERVAL',
++      'PAST_START', 'DURATION_LIMIT', 'INVALID_TIME', 'UNAVAILABLE',
++    ].includes(request.reasonCode) ||
++    (request.isAvailable !== (request.reasonCode === 'AVAILABLE'))
++  ) {
++    throw new Error('Invalid structured explanation request.');
++  }
++}
++
++/** Basic format and status-consistency checks; a real model needs stricter review. */
++export function isValidExplanationResponse(
++  response: unknown,
++  isAvailable: boolean
++): response is ExplanationResponse {
++  if (typeof response !== 'object' || response === null || !('explanation' in response)) {
++    return false;
++  }
++  const value = (response as { explanation: unknown }).explanation;
++  if (typeof value !== 'string') return false;
++  const text = value.trim();
++  const sentenceCount = text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length;
++  if (!text || text.length > MAX_EXPLANATION_LENGTH || sentenceCount > 2) return false;
++  if (isAvailable) return /\bis available\b/i.test(text) && !/\bis unavailable\b/i.test(text);
++  return /\bis unavailable\b/i.test(text);
++}
++
++/** Produces explanatory text from structured facts, without an LLM API call. */
++export async function mockExplainAvailability(
++  request: ExplanationRequest
++): Promise<ExplanationResponse> {
++  validateRequest(request);
++  const room = request.roomLabel.trim();
++  const reasonText: Record<ExplanationReasonCode, string> = {
++    AVAILABLE: `Room ${room} is available from ${request.startTime} to ${request.endTime} because there are no conflicting bookings.`,
++    OVERLAP: `Room ${room} is unavailable because the requested interval overlaps an existing booking.`,
++    ROOM_BLOCKED: `Room ${room} is unavailable because it is blocked.`,
++    INVALID_INTERVAL: `Room ${room} is unavailable because the selected time interval is invalid.`,
++    PAST_START: `Room ${room} is unavailable because the start time must be after the simulated current time.`,
++    DURATION_LIMIT: `Room ${room} is unavailable because the requested duration exceeds 120 minutes.`,
++    INVALID_TIME: `Room ${room} is unavailable because valid start and end times are required.`,
++    UNAVAILABLE: `Room ${room} is unavailable under the current booking rules.`,
++  };
++
++  return { explanation: reasonText[request.reasonCode] };
++}
++
++export function fallbackExplanation(isAvailable: boolean): string {
++  return isAvailable
++    ? 'The rule-based result is Available. The explanation is temporarily unavailable.'
++    : 'The rule-based result is Unavailable. The explanation is temporarily unavailable.';
++}
++
++/**
++ * Wraps a mock (or future server-side) adapter with response checks and a timeout.
++ * The optional adapter argument is a test seam: it can simulate API failure or delay
++ * without network calls or extra dependencies.
++ */
++export async function explainAvailabilitySafely(
++  request: ExplanationRequest,
++  adapter: (request: ExplanationRequest) => Promise<unknown> = mockExplainAvailability,
++  timeoutMs = 2000
++): Promise<{ explanation: string; usedFallback: boolean }> {
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  try {
++    // Validate BEFORE calling the adapter, so invalid data is never forwarded.
++    validateRequest(request);
++    const response = await Promise.race([
++      adapter(request),
++      new Promise<never>((_, reject) => {
++        timer = setTimeout(() => reject(new Error('Explanation timeout.')), timeoutMs);
++      }),
++    ]);
++    if (!isValidExplanationResponse(response, request.isAvailable)) {
++      throw new Error('Invalid explanation response.');
++    }
++    return { explanation: response.explanation, usedFallback: false };
++  } catch {
++    return {
++      explanation: fallbackExplanation(request?.isAvailable === true),
++      usedFallback: true,
++    };
++  } finally {
++    if (timer !== undefined) clearTimeout(timer);
++  }
++}

@@ -1,0 +1,8 @@
+Read-only direct runtime probes of compiled Task05 adapter (not part of the project test suite):
+- isValidExplanationResponse({explanation: 'Room B220 is unavailable because it is blocked.'}, false) -> true. However structured B220 reasonCode is OVERLAP, not ROOM_BLOCKED.
+- isValidExplanationResponse({explanation: 'Room B220 is unavailable, but it is available after 16:00.'}, false) -> true (mixed claims accepted).
+- explainAvailabilitySafely({roomLabel:'A101', startTime:'16:00',endTime:'15:00',isAvailable:true,reasonCode:'AVAILABLE'}) -> usedFallback: false; returns 'Room A101 is available from 16:00 to 15:00...'. The current UI is protected by checkAvailability and would not normally create this inconsistent request.
+- getExplanationReasonCode({available:false,reasons:['Overlapping booking at 15:00–16:00']}) -> UNAVAILABLE. This is a hypothetical change to checker wording, NOT a current production output.
+- checkAvailability(room with no bookings, 840, 900, NaN) -> available:true. Reproduced by transpiling baseline availability.ts in isolation with compatible time helpers. This is a pre-existing defect, not caused by Task05.
+
+User reports Bolt execution: npm test -> 8 files passed, 65 tests passed; typecheck/lint/build completed. Manual UI verification 7/7 passed. Warnings about TypeScript tool version and Browserslist are non-blocking.
